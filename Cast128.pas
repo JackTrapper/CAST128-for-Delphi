@@ -1,12 +1,12 @@
 {
 ***************************************************
-* A binary compatible Cast128 implementation      *
+* A binary compatible CAST-128 implementation     *
 * written by Dave Barton (davebarton@bigfoot.com) *
 * Based on C source by                            *
 * Steve Reid <sreid@sea-to-sky.net>               *
 ***************************************************
-* 64bit block encryption                          *
-* Variable size key - up to 128bit                *
+* 64-bit block encryption                         *
+* Variable size key - up to 128-bit               *
 ***************************************************
 }
 unit Cast128;
@@ -14,25 +14,26 @@ unit Cast128;
 interface
 
 uses
-	Sysutils;
+	SysUtils;
 
 type
-	TCast128Data = record
-		InitBlock: array[0..7] of Byte;    { initial IV }
-		LastBlock: array[0..7] of Byte;    { current IV }
-		xKey: array[0..31] of LongWord;
-		Rounds: integer;
-	end;
-
 	TCast128 = class(TObject)
 	private
-		FData: TCast128Data;
+		FKey: array[0..31] of LongWord;
+		FInitBlock: array[0..7] of Byte;    { initial IV }
+		FLastBlock: array[0..7] of Byte;    { current IV }
+		FRounds: Integer;
 		FInitialized: Boolean;
 		function SelfTestA: Boolean; //Single Plaintext-key-ciphertext set
 		function SelfTestB: Boolean; //Full maintenance test
+		class function F1(D, K: Cardinal; r: Byte): Cardinal;
+		class function F2(D, K: Cardinal; r: Byte): Cardinal;
+		class function F3(D, K: Cardinal; r: Byte): Cardinal;
 	public
+		destructor Destroy; override;
+
 		{Setup}
-		// Initializes the TCast128Data structure with the key information and IV if applicable
+		// Initializes internal key information and IV if applicable
 		procedure Init(Key: Pointer; Len: Integer; IV: Pointer);
 		// Erases all information about the key
 		procedure Burn;
@@ -69,10 +70,6 @@ type
 		function SelfTest: Boolean;
 	end;
 
-	function LRot32(X: LongWord; c: Byte): LongWord;
-	procedure XorBlock(I1, I2, O1: PByteArray; Len: integer);
-	procedure IncBlock(P: PByteArray; Len: integer);
-
 
 implementation
 
@@ -94,6 +91,44 @@ type
 		procedure TestSelfTest;
 	end;
 {$ENDIF}
+
+function LRot32(X: LongWord; c: Byte): LongWord;
+{$IFDEF PUREPASCAL}
+begin
+	Result := (X shl c) or (X shr (32-c));
+{$ELSE !PUREPASCAL}
+	{$IFDEF CPUX86}
+	asm
+		MOV cl, c;
+		ROL eax, cl;
+	{$ENDIF CPUX86}
+	{$IFDEF CPUX64}
+	//http://blogs.msdn.com/b/oldnewthing/archive/2004/01/14/58579.aspx
+	//In x64 calling convention the first four parameters are passed in rcx, rdx, r8, r9
+	//Return value is in RAX
+	asm
+		MOV eax, ecx; //store result in eax
+		MOV cl, c;    //rol left only supports from rolling from cl
+		ROL eax, cl;
+	{$ENDIF}
+{$ENDIF !PUREPASCAL}
+end;
+
+procedure XorBlock(I1, I2, O1: PByteArray; Len: integer);
+var
+	i: Integer;
+begin
+	//O1 <- I1 xor I2
+	for i := 0 to Len-1 do
+		O1[i] := I1[i] xor I2[i];
+end;
+
+procedure IncBlock(P: PByteArray; Len: integer);
+begin
+	Inc(P[Len-1]);
+	if (P[Len-1] = 0) and (Len > 1) then
+		IncBlock(P,Len-1);
+end;
 
 const
 	sbox1: array[0..255] of LongWord = (
@@ -468,7 +503,7 @@ begin
 end;
 
 //**********************************************************************
-//* Cast128Init: initializes the TCast128Data structure with the key   *
+//* Cast128Init: initializes internal key state                        *
 //*              information and IV if applicable                      *
 //*     var Key: Pointer - to array[0..15] of byte - key FData         *
 //*         Len: Integer - key length in bytes - SizeOf(Key)           *
@@ -482,135 +517,136 @@ begin
 	if (Len <= 0) or (Len> 16) then
 		raise Exception.Create('Cast128: Key must be between 1 and 16 bytes long');
 
-	with FData do
-	begin
-		if IV = nil then
-		begin
-			FillChar(InitBlock, 8, 0);
-			FillChar(LastBlock, 8, 0);
-		end
-		else
-		begin
-			Move(IV^, InitBlock, 8);
-			Move(IV^, LastBlock, 8);
-		end;
-		if Len <= 10 then
-			Rounds := 12
-		else
-			Rounds := 16;
+   if IV = nil then
+   begin
+      FillChar(FInitBlock, 8, 0);
+      FillChar(FLastBlock, 8, 0);
+   end
+   else
+   begin
+      Move(IV^, FInitBlock, 8);
+      Move(IV^, FLastBlock, 8);
+   end;
+   if Len <= 10 then
+      FRounds := 12
+   else
+      FRounds := 16;
 
-		FillChar(x, Sizeof(x),0);
-		Move(Key^, x, Len);
+   FillChar(x, Sizeof(x),0);
+   Move(Key^, x, Len);
 
-		x[0] := (x[0] shr 24) or ((x[0] shr 8) and $FF00) or ((x[0] shl 8) and $FF0000) or (x[0] shl 24);
-		x[1] := (x[1] shr 24) or ((x[1] shr 8) and $FF00) or ((x[1] shl 8) and $FF0000) or (x[1] shl 24);
-		x[2] := (x[2] shr 24) or ((x[2] shr 8) and $FF00) or ((x[2] shl 8) and $FF0000) or (x[2] shl 24);
-		x[3] := (x[3] shr 24) or ((x[3] shr 8) and $FF00) or ((x[3] shl 8) and $FF0000) or (x[3] shl 24);
+	//Flip each UInt32 to big-endian
+   x[0] := (x[0] shr 24) or ((x[0] shr 8) and $FF00) or ((x[0] shl 8) and $FF0000) or (x[0] shl 24);
+   x[1] := (x[1] shr 24) or ((x[1] shr 8) and $FF00) or ((x[1] shl 8) and $FF0000) or (x[1] shl 24);
+   x[2] := (x[2] shr 24) or ((x[2] shr 8) and $FF00) or ((x[2] shl 8) and $FF0000) or (x[2] shl 24);
+   x[3] := (x[3] shr 24) or ((x[3] shr 8) and $FF00) or ((x[3] shl 8) and $FF0000) or (x[3] shl 24);
 
-		i := 0;
-		while i < 32 do
-		begin
-			case (i and 4) of
-			0: begin
-					z[0] := x[0] xor sbox5[(x[3] shr 16) and $FF] xor sbox6[x[3] and $FF] xor sbox7[x[3] shr 24] xor sbox8[(x[3] shr 8) and $FF] xor sbox7[x[2] shr 24];
-					t[0] := z[0];
+   i := 0;
+   while i < 32 do
+   begin
+      case (i and 4) of
+      0: begin
+            z[0] := x[0] xor sbox5[(x[3] shr 16) and $FF] xor sbox6[x[3] and $FF] xor sbox7[x[3] shr 24] xor sbox8[(x[3] shr 8) and $FF] xor sbox7[x[2] shr 24];
+            t[0] := z[0];
 
-					z[1] := x[2] xor sbox5[z[0] shr 24] xor sbox6[(z[0] shr 8) and $FF] xor sbox7[(z[0] shr 16) and $FF] xor sbox8[z[0] and $FF] xor sbox8[(x[2] shr 8) and $FF];
-					t[1] := z[1];
+            z[1] := x[2] xor sbox5[z[0] shr 24] xor sbox6[(z[0] shr 8) and $FF] xor sbox7[(z[0] shr 16) and $FF] xor sbox8[z[0] and $FF] xor sbox8[(x[2] shr 8) and $FF];
+            t[1] := z[1];
 
-					z[2] := x[3] xor sbox5[z[1] and $FF] xor sbox6[(z[1] shr 8) and $FF] xor sbox7[(z[1] shr 16) and $FF] xor sbox8[z[1] shr 24] xor sbox5[(x[2] shr 16) and $FF];
-					t[2] := z[2];
+            z[2] := x[3] xor sbox5[z[1] and $FF] xor sbox6[(z[1] shr 8) and $FF] xor sbox7[(z[1] shr 16) and $FF] xor sbox8[z[1] shr 24] xor sbox5[(x[2] shr 16) and $FF];
+            t[2] := z[2];
 
-					z[3] := x[1] xor sbox5[(z[2] shr 8) and $FF] xor sbox6[(z[2] shr 16) and $FF] xor sbox7[z[2] and $FF] xor sbox8[z[2] shr 24] xor sbox6[x[2] and $FF];
-					t[3] := z[3];
-				end;
-			4:
-				begin
-					x[0] := z[2] xor sbox5[(z[1] shr 16) and $FF] xor sbox6[z[1] and $FF] xor sbox7[z[1] shr 24] xor sbox8[(z[1] shr 8) and $FF] xor sbox7[z[0] shr 24];
-					t[0] := x[0];
+            z[3] := x[1] xor sbox5[(z[2] shr 8) and $FF] xor sbox6[(z[2] shr 16) and $FF] xor sbox7[z[2] and $FF] xor sbox8[z[2] shr 24] xor sbox6[x[2] and $FF];
+            t[3] := z[3];
+         end;
+      4:
+         begin
+            x[0] := z[2] xor sbox5[(z[1] shr 16) and $FF] xor sbox6[z[1] and $FF] xor sbox7[z[1] shr 24] xor sbox8[(z[1] shr 8) and $FF] xor sbox7[z[0] shr 24];
+            t[0] := x[0];
 
-					x[1] := z[0] xor sbox5[x[0] shr 24] xor sbox6[(x[0] shr 8) and $FF] xor sbox7[(x[0] shr 16) and $FF] xor sbox8[x[0] and $FF] xor sbox8[(z[0] shr 8) and $FF];
-					t[1] := x[1];
+            x[1] := z[0] xor sbox5[x[0] shr 24] xor sbox6[(x[0] shr 8) and $FF] xor sbox7[(x[0] shr 16) and $FF] xor sbox8[x[0] and $FF] xor sbox8[(z[0] shr 8) and $FF];
+            t[1] := x[1];
 
-					x[2] := z[1] xor sbox5[x[1] and $FF] xor sbox6[(x[1] shr 8) and $FF] xor sbox7[(x[1] shr 16) and $FF] xor sbox8[x[1] shr 24] xor sbox5[(z[0] shr 16) and $FF];
-					t[2] := x[2];
+            x[2] := z[1] xor sbox5[x[1] and $FF] xor sbox6[(x[1] shr 8) and $FF] xor sbox7[(x[1] shr 16) and $FF] xor sbox8[x[1] shr 24] xor sbox5[(z[0] shr 16) and $FF];
+            t[2] := x[2];
 
-					x[3] := z[3] xor sbox5[(x[2] shr 8) and $FF] xor sbox6[(x[2] shr 16) and $FF] xor sbox7[x[2] and $FF] xor sbox8[x[2] shr 24] xor sbox6[z[0] and $FF];
-					t[3] := x[3];
-	          end;
-	      end;
+            x[3] := z[3] xor sbox5[(x[2] shr 8) and $FF] xor sbox6[(x[2] shr 16) and $FF] xor sbox7[x[2] and $FF] xor sbox8[x[2] shr 24] xor sbox6[z[0] and $FF];
+            t[3] := x[3];
+          end;
+      end;
 
-	      case (i and 12) of
-			0, 12:
-				begin
-					xKey[i+0] := sbox5[t[2] shr 24] xor sbox6[(t[2] shr 16) and $FF] xor sbox7[t[1] and $FF] xor sbox8[(t[1] shr 8) and $FF];
-					xKey[i+1] := sbox5[(t[2] shr 8) and $FF] xor sbox6[t[2] and $FF] xor sbox7[(t[1] shr 16) and $FF] xor sbox8[t[1] shr 24];
-	            xKey[i+2] := sbox5[t[3] shr 24] xor sbox6[(t[3] shr 16) and $FF] xor sbox7[t[0] and $FF] xor sbox8[(t[0] shr 8) and $FF];
-	            xKey[i+3] := sbox5[(t[3] shr 8) and $FF] xor sbox6[t[3] and $FF] xor sbox7[(t[0] shr 16) and $FF] xor sbox8[t[0] shr 24];
-				end;
-			4,8:
-				begin
-					xKey[i+0] := sbox5[t[0] and $FF] xor sbox6[(t[0] shr 8) and $FF] xor sbox7[t[3] shr 24] xor sbox8[(t[3] shr 16) and $FF];
-	            xKey[i+1] := sbox5[(t[0] shr 16) and $FF] xor sbox6[t[0] shr 24] xor sbox7[(t[3] shr 8) and $FF] xor sbox8[t[3] and $FF];
-	            xKey[i+2] := sbox5[t[1] and $FF] xor sbox6[(t[1] shr 8) and $FF] xor sbox7[t[2] shr 24] xor sbox8[(t[2] shr 16) and $FF];
-	            xKey[i+3] := sbox5[(t[1] shr 16) and $FF] xor sbox6[t[1] shr 24] xor sbox7[(t[2] shr 8) and $FF] xor sbox8[t[2] and $FF];
-				end;
-	      end;
+      case (i and 12) of
+      0, 12:
+         begin
+            FKey[i+0] := sbox5[t[2] shr 24] xor sbox6[(t[2] shr 16) and $FF] xor sbox7[t[1] and $FF] xor sbox8[(t[1] shr 8) and $FF];
+            FKey[i+1] := sbox5[(t[2] shr 8) and $FF] xor sbox6[t[2] and $FF] xor sbox7[(t[1] shr 16) and $FF] xor sbox8[t[1] shr 24];
+            FKey[i+2] := sbox5[t[3] shr 24] xor sbox6[(t[3] shr 16) and $FF] xor sbox7[t[0] and $FF] xor sbox8[(t[0] shr 8) and $FF];
+            FKey[i+3] := sbox5[(t[3] shr 8) and $FF] xor sbox6[t[3] and $FF] xor sbox7[(t[0] shr 16) and $FF] xor sbox8[t[0] shr 24];
+         end;
+      4,8:
+         begin
+            FKey[i+0] := sbox5[t[0] and $FF] xor sbox6[(t[0] shr 8) and $FF] xor sbox7[t[3] shr 24] xor sbox8[(t[3] shr 16) and $FF];
+            FKey[i+1] := sbox5[(t[0] shr 16) and $FF] xor sbox6[t[0] shr 24] xor sbox7[(t[3] shr 8) and $FF] xor sbox8[t[3] and $FF];
+            FKey[i+2] := sbox5[t[1] and $FF] xor sbox6[(t[1] shr 8) and $FF] xor sbox7[t[2] shr 24] xor sbox8[(t[2] shr 16) and $FF];
+            FKey[i+3] := sbox5[(t[1] shr 16) and $FF] xor sbox6[t[1] shr 24] xor sbox7[(t[2] shr 8) and $FF] xor sbox8[t[2] and $FF];
+         end;
+      end;
 
-			case (i and 12) of
-			0:
-				begin
-					xKey[i+0] := xKey[i+0] xor sbox5[(z[0] shr 8) and $FF];
-					xKey[i+1] := xKey[i+1] xor sbox6[(z[1] shr 8) and $FF];
-					xKey[i+2] := xKey[i+2] xor sbox7[(z[2] shr 16) and $FF];
-					xKey[i+3] := xKey[i+3] xor sbox8[z[3] shr 24];
-	          end;
-			4:
-				begin
-					xKey[i+0] := xKey[i+0] xor sbox5[x[2] shr 24];
-					xKey[i+1] := xKey[i+1] xor sbox6[(x[3] shr 16) and $FF];
-					xKey[i+2] := xKey[i+2] xor sbox7[x[0] and $FF];
-					xKey[i+3] := xKey[i+3] xor sbox8[x[1] and $FF];
-				end;
-			8:
-				begin
-					xKey[i+0] := xKey[i+0] xor sbox5[(z[2] shr 16) and $FF];
-					xKey[i+1] := xKey[i+1] xor sbox6[z[3] shr 24];
-					xKey[i+2] := xKey[i+2] xor sbox7[(z[0] shr 8) and $FF];
-					xKey[i+3] := xKey[i+3] xor sbox8[(z[1] shr 8) and $FF];
-				end;
-			12:
-				begin
-					xKey[i+0] := xKey[i+0] xor sbox5[x[0] and $FF];
-					xKey[i+1] := xKey[i+1] xor sbox6[x[1] and $FF];
-					xKey[i+2] := xKey[i+2] xor sbox7[x[2] shr 24];
-					xKey[i+3] := xKey[i+3] xor sbox8[(x[3] shr 16) and $FF];
-				end;
-			end;
+      case (i and 12) of
+      0:
+         begin
+            FKey[i+0] := FKey[i+0] xor sbox5[(z[0] shr 8) and $FF];
+            FKey[i+1] := FKey[i+1] xor sbox6[(z[1] shr 8) and $FF];
+            FKey[i+2] := FKey[i+2] xor sbox7[(z[2] shr 16) and $FF];
+            FKey[i+3] := FKey[i+3] xor sbox8[z[3] shr 24];
+          end;
+      4:
+         begin
+            FKey[i+0] := FKey[i+0] xor sbox5[x[2] shr 24];
+            FKey[i+1] := FKey[i+1] xor sbox6[(x[3] shr 16) and $FF];
+            FKey[i+2] := FKey[i+2] xor sbox7[x[0] and $FF];
+            FKey[i+3] := FKey[i+3] xor sbox8[x[1] and $FF];
+         end;
+      8:
+         begin
+            FKey[i+0] := FKey[i+0] xor sbox5[(z[2] shr 16) and $FF];
+            FKey[i+1] := FKey[i+1] xor sbox6[z[3] shr 24];
+            FKey[i+2] := FKey[i+2] xor sbox7[(z[0] shr 8) and $FF];
+            FKey[i+3] := FKey[i+3] xor sbox8[(z[1] shr 8) and $FF];
+         end;
+      12:
+         begin
+            FKey[i+0] := FKey[i+0] xor sbox5[x[0] and $FF];
+            FKey[i+1] := FKey[i+1] xor sbox6[x[1] and $FF];
+            FKey[i+2] := FKey[i+2] xor sbox7[x[2] shr 24];
+            FKey[i+3] := FKey[i+3] xor sbox8[(x[3] shr 16) and $FF];
+         end;
+      end;
 
-			if (i >= 16) then
-			begin
-				xKey[i+0] := xKey[i+0] and 31;
-				xKey[i+1] := xKey[i+1] and 31;
-				xKey[i+2] := xKey[i+2] and 31;
-				xKey[i+3] := xKey[i+3] and 31;
-			end;
-			Inc(i,4);
-		end;
-	end;
+      if (i >= 16) then
+      begin
+         FKey[i+0] := FKey[i+0] and 31;
+         FKey[i+1] := FKey[i+1] and 31;
+         FKey[i+2] := FKey[i+2] and 31;
+         FKey[i+3] := FKey[i+3] and 31;
+      end;
+      Inc(i,4);
+   end;
 	FInitialized := True;
 end;
 
 procedure TCast128.Burn;
 begin
-	FillChar(FData, Sizeof(FData), 0);
+	FillChar(FKey, Sizeof(FKey), 0);
+	FillChar(FInitBlock, sizeof(FInitBlock), 0);
+	FillChar(FLastBlock, sizeof(FLastBlock), 0);
+	FRounds := 0;
+
 	FInitialized := False;
 end;
 
 procedure TCast128.EncryptECB(InData, OutData: Pointer);
 var
-	t, l, r: LongWord;
-	Ia, Ib, Ic, Id: PByte; //Ia (most significat) --> Id (least significant)
+	l, r: LongWord;
 begin
 {$Q-}
 	{
@@ -628,63 +664,27 @@ begin
 	l := (l shr 24) or ((l shr 8) and $FF00) or ((l shl 8) and $FF0000) or (l shl 24);
 	r := (r shr 24) or ((r shr 8) and $FF00) or ((r shl 8) and $FF0000) or (r shl 24);
 
-	//Map 4-byte T --> [IaIbIcId] --> [Id,Ic,Ib,Ia]
-	Id := @t;
-	Ic := Id; Inc(Ic);
-	Ib := Ic; Inc(Ib);
-	Ia := Ib; Inc(Ia);
-
 	// Main mixing
-	t := LRot32(FData.xKey[0]+r, FData.xKey[0+16]);
-	l := l xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
+	l := l xor F1(r, FKey[ 0], FKey[16+ 0]);
+	r := r xor F2(l, FKey[ 1], FKey[16+ 1]);
+	l := l xor F3(r, FKey[ 2], FKey[16+ 2]);
+	r := r xor F1(l, FKey[ 3], FKey[16+ 3]);
+	l := l xor F2(r, FKey[ 4], FKey[16+ 4]);
+	r := r xor F3(l, FKey[ 5], FKey[16+ 5]);
+	l := l xor F1(r, FKey[ 6], FKey[16+ 6]);
+	r := r xor F2(l, FKey[ 7], FKey[16+ 7]);
+	l := l xor F3(r, FKey[ 8], FKey[16+ 8]);
+	r := r xor F1(l, FKey[ 9], FKey[16+ 9]);
+	l := l xor F2(r, FKey[10], FKey[16+10]);
+	r := r xor F3(l, FKey[11], FKey[16+11]);
 
-	t := LRot32(FData.xKey[1] xor l, FData.xKey[1+16]);
-	r := r xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-	t := LRot32(FData.xKey[2]-r, FData.xKey[2+16]);
-	l := l xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-	t := LRot32(FData.xKey[3]+l, FData.xKey[3+16]);
-	r := r xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-
-	t := LRot32(FData.xKey[4] xor r, FData.xKey[4+16]);
-	l := l xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-	t := LRot32(FData.xKey[5]-l, FData.xKey[5+16]);
-	r := r xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-	t := LRot32(FData.xKey[6]+r, FData.xKey[6+16]);
-	l := l xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-
-	t := LRot32(FData.xKey[7] xor l, FData.xKey[7+16]);
-	r := r xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-	t := LRot32(FData.xKey[8]-r, FData.xKey[8+16]);
-	l := l xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-	t := LRot32(FData.xKey[9]+l, FData.xKey[9+16]);
-	r := r xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-
-	t := LRot32(FData.xKey[10] xor r, FData.xKey[10+16]);
-	l := l xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-	t := LRot32(FData.xKey[11]-l, FData.xKey[11+16]);
-	r := r xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-	if FData.Rounds > 12 then
+	if FRounds > 12 then
 	begin
-		t := LRot32(FData.xKey[12]+r, FData.xKey[12+16]);
-		l := l xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-
-		t := LRot32(FData.xKey[13] xor l, FData.xKey[13+16]);
-		r := r xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-		t := LRot32(FData.xKey[14]-r, FData.xKey[14+16]);
-		l := l xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-		t := LRot32(FData.xKey[15]+l, FData.xKey[15+16]);
-		r := r xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-	end;
+		l := l xor F1(r, FKey[12], FKey[16+12]);
+		r := r xor F2(l, FKey[13], FKey[16+13]);
+		l := l xor F3(r, FKey[14], FKey[16+14]);
+		r := r xor F1(l, FKey[15], FKey[16+15]);
+  	end;
 
 	// Endian swap L and R back to little endian
 	l := (l shr 24) or ((l shr 8) and $FF00) or ((l shl 8) and $FF0000) or (l shl 24);
@@ -698,7 +698,6 @@ end;
 procedure TCast128.DecryptECB(InData, OutData: Pointer);
 var
 	l, r, t: LongWord;
-	Ia, Ib, Ic, Id: PByte; //Ia (most significat) --> Id (least significant)
 begin
 	if not FInitialized then
 		raise Exception.Create('TCast128 object must be initialized before(.Init) before it can be used.');
@@ -710,62 +709,26 @@ begin
 	l := (l shr 24) or ((l shr 8) and $FF00) or ((l shl 8) and $FF0000) or (l shl 24);
 	r := (r shr 24) or ((r shr 8) and $FF00) or ((r shl 8) and $FF0000) or (r shl 24);
 
-	//Map 4-byte T --> [IaIbIcId] --> [Id,Ic,Ib,Ia]
-	Id := @t;
-	Ic := Id; Inc(Ic);
-	Ib := Ic; Inc(Ib);
-	Ia := Ib; Inc(Ia);
-
-	if FData.Rounds > 12 then
+	if FRounds > 12 then
 	begin
-		t := LRot32(FData.xKey[15] + l,   FData.xKey[15+16]);
-		r := r xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
+		r := r xor F1(l, FKey[15], FKey[16+15]);
+		l := l xor F3(r, FKey[14], FKey[16+14]);
+		r := r xor F2(l, FKey[13], FKey[16+13]);
+		l := l xor F1(r, FKey[12], FKey[16+12]);
+  	end;
 
-		t := LRot32(FData.xKey[14] - r,   FData.xKey[14+16]);
-		l := l xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-		t := LRot32(FData.xKey[13] xor l, FData.xKey[13+16]);
-		r := r xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-		t := LRot32(FData.xKey[12] + r,   FData.xKey[12+16]);
-		l := l xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-	end;
-
-	t := LRot32(FData.xKey[11] - l,      FData.xKey[11+16]);
-	r := r xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-	t := LRot32(FData.xKey[10] xor r,    FData.xKey[10+16]);
-	l := l xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-	t := LRot32(FData.xKey[9] + l,       FData.xKey[9+16]);
-	r := r xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-
-	t := LRot32(FData.xKey[8] - r,       FData.xKey[8+16]);
-	l := l xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-	t := LRot32(FData.xKey[7] xor l,     FData.xKey[7+16]);
-	r := r xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-	t := LRot32(FData.xKey[6] + r,       FData.xKey[6+16]);
-	l := l xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-
-	t := LRot32(FData.xKey[5] - l,       FData.xKey[5+16]);
-	r := r xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-	t := LRot32(FData.xKey[4] xor r,     FData.xKey[4+16]);
-	l := l xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-	t := LRot32(FData.xKey[3] + l,       FData.xKey[3+16]);
-	r := r xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) + sbox4[Id^]);
-
-	t := LRot32(FData.xKey[2] - r,       FData.xKey[2+16]);
-	l := l xor (((sbox1[Ia^] + sbox2[Ib^]) xor sbox3[Ic^]) - sbox4[Id^]);
-
-	t := LRot32(FData.xKey[1] xor l,     FData.xKey[1+16]);
-	r := r xor (((sbox1[Ia^] - sbox2[Ib^]) + sbox3[Ic^]) xor sbox4[Id^]);
-
-	t := LRot32(FData.xKey[0] + r,       FData.xKey[0+16]);
-	l := l xor (((sbox1[Ia^] xor sbox2[Ib^]) - sbox3[Ic^]) +sbox4[Id^]);
+	r := r xor F3(l, FKey[11], FKey[16+11]);
+	l := l xor F2(r, FKey[10], FKey[16+10]);
+	r := r xor F1(l, FKey[ 9], FKey[16+ 9]);
+	l := l xor F3(r, FKey[ 8], FKey[16+ 8]);
+	r := r xor F2(l, FKey[ 7], FKey[16+ 7]);
+	l := l xor F1(r, FKey[ 6], FKey[16+ 6]);
+	r := r xor F3(l, FKey[ 5], FKey[16+ 5]);
+	l := l xor F2(r, FKey[ 4], FKey[16+ 4]);
+	r := r xor F1(l, FKey[ 3], FKey[16+ 3]);
+	l := l xor F3(r, FKey[ 2], FKey[16+ 2]);
+	r := r xor F2(l, FKey[ 1], FKey[16+ 1]);
+	l := l xor F1(r, FKey[ 0], FKey[16+ 0]);
 
 	// Swap L and R back to little-endian
 	l := (l shr 24) or ((l shr 8) and $FF00) or ((l shl 8) and $FF0000) or (l shl 24);
@@ -781,9 +744,9 @@ begin
 	if not FInitialized then
 		raise Exception.Create('TCast128 object must be initialized before(.Init) before it can be used.');
 
-	XorBlock(InData, @FData.LastBlock, OutData, 8);
+	XorBlock(InData, @FLastBlock, OutData, 8);
 	EncryptECB(OutData, OutData);
-	Move(OutData^, FData.LastBlock, 8);
+	Move(OutData^, FLastBlock, 8);
 end;
 
 procedure TCast128.DecryptCBC(InData, OutData: Pointer);
@@ -795,8 +758,8 @@ begin
 
 	Move(InData^, tempBlock, 8);
 	DecryptECB(InData, OutData);
-	XorBlock(OutData, @FData.LastBlock, OutData, 8);
-	Move(tempBlock, FData.LastBlock, 8);
+	XorBlock(OutData, @FLastBlock, OutData, 8);
+	Move(tempBlock, FLastBlock, 8);
 end;
 
 procedure TCast128.EncryptCFB(InData, OutData: Pointer; Len: Integer);
@@ -809,11 +772,11 @@ begin
 
 	for i := 0 to Len-1 do
 	begin
-		EncryptECB(@FData.LastBlock, @tempBlock);
+		EncryptECB(@FLastBlock, @tempBlock);
 
 		PByteArray(OutData)[i] := PByteArray(InData)[i] xor tempBlock[0];
-		Move(FData.LastBlock[1], FData.LastBlock[0], 7);
-		FData.LastBlock[7] := PByteArray(OutData)[i];
+		Move(FLastBlock[1], FLastBlock[0], 7);
+		FLastBlock[7] := PByteArray(OutData)[i];
 	end;
 end;
 
@@ -829,10 +792,10 @@ begin
 	for i := 0 to Len-1 do
 	begin
 		b := PByteArray(InData)[i];
-		EncryptECB(@FData.LastBlock, @tempBlock);
+		EncryptECB(@FLastBlock, @tempBlock);
 		PByteArray(OutData)[i] := PByteArray(InData)[i] xor TempBlock[0];
-		Move(FData.LastBlock[1], FData.LastBlock[0], 7);
-		FData.LastBlock[7] := b;
+		Move(FLastBlock[1], FLastBlock[0], 7);
+		FLastBlock[7] := b;
 	end;
 end;
 
@@ -841,8 +804,8 @@ begin
 	if not FInitialized then
 		raise Exception.Create('TCast128 object must be initialized before(.Init) before it can be used.');
 
-	EncryptECB(@FData.LastBlock, @FData.LastBlock);
-	XorBlock(@FData.LastBlock, InData, OutData,8);
+	EncryptECB(@FLastBlock, @FLastBlock);
+	XorBlock(@FLastBlock, InData, OutData,8);
 end;
 
 procedure TCast128.DecryptOFB(InData, OutData: Pointer);
@@ -850,8 +813,8 @@ begin
 	if not FInitialized then
 		raise Exception.Create('TCast128 object must be initialized before(.Init) before it can be used.');
 
-	EncryptECB(@FData.LastBlock, @FData.LastBlock);
-	XorBlock(@FData.LastBlock, InData, OutData, 8);
+	EncryptECB(@FLastBlock, @FLastBlock);
+	XorBlock(@FLastBlock, InData, OutData, 8);
 end;
 
 procedure TCast128.EncryptOFBC(InData, OutData: pointer; Len: integer);
@@ -864,10 +827,37 @@ begin
 
 	for i := 0 to Len-1 do
 	begin
-		EncryptECB(@FData.LastBlock, @tempBlock);
+		EncryptECB(@FLastBlock, @tempBlock);
 		PByteArray(OutData)[i]:= PByteArray(InData)[i] xor tempBlock[0];
-		IncBlock(@FData.LastBlock, 8);
+		IncBlock(@FLastBlock, 8);
 	end;
+end;
+
+class function TCast128.F1(D, K: Cardinal; r: Byte): Cardinal;
+var
+	I: Cardinal;
+begin
+	I := K + D;
+	I := LRot32(I, r);
+	Result := sbox1[I shr 24] xor sbox2[(I shr 16) and $ff] - sbox3[(I shr 8) and $FF] + sbox4[I and $FF];
+end;
+
+class function TCast128.F2(D, K: Cardinal; r: Byte): Cardinal;
+var
+	I: Cardinal;
+begin
+	I := K xor D;
+	I := LRot32(I, r);
+	Result := sbox1[I shr 24] - sbox2[(I shr 16) and $ff] + sbox3[(I shr 8) and $FF] xor sbox4[I and $FF];
+end;
+
+class function TCast128.F3(D, K: Cardinal; r: Byte): Cardinal;
+var
+	I: Cardinal;
+begin
+	I := K - D;
+	I := LRot32(I, r);
+	Result := sbox1[I shr 24] + sbox2[(I shr 16) and $ff] xor sbox3[(I shr 8) and $FF] - sbox4[I and $FF];
 end;
 
 procedure TCast128.DecryptOFBC(InData, OutData: pointer; Len: integer);
@@ -880,10 +870,17 @@ begin
 
 	for i := 0 to Len-1 do
 	begin
-		EncryptECB(@FData.LastBlock, @tempBlock);
+		EncryptECB(@FLastBlock, @tempBlock);
 		PByteArray(OutData)[i] := PByteArray(InData)[i] xor tempBlock[0];
-		IncBlock(@FData.LastBlock, 8);
+		IncBlock(@FLastBlock, 8);
 	end;
+end;
+
+destructor TCast128.Destroy;
+begin
+	Self.Burn;
+
+	inherited;
 end;
 
 procedure TCast128.Reset;
@@ -891,45 +888,7 @@ begin
 	if not FInitialized then
 		raise Exception.Create('TCast128 object must be initialized before(.Init) before it can be used.');
 
-	Move(FData.InitBlock, FData.LastBlock,8);
-end;
-
-function LRot32(X: LongWord; c: Byte): LongWord;
-{$IFDEF PUREPASCAL}
-begin
-	Result := (X shl c) or (X shr (32-c));
-{$ELSE !PUREPASCAL}
-	{$IFDEF CPUX86}
-	asm
-		MOV cl, c;
-		ROL eax, cl;
-	{$ENDIF CPUX86}
-	{$IFDEF CPUX64}
-	//http://blogs.msdn.com/b/oldnewthing/archive/2004/01/14/58579.aspx
-	//In x64 calling convention the first four parameters are passed in rcx, rdx, r8, r9
-	//Return value is in RAX
-	asm
-		MOV eax, ecx; //store result in eax
-		MOV cl, c;    //rol left only supports from rolling from cl
-		ROL eax, cl;
-	{$ENDIF}
-{$ENDIF !PUREPASCAL}
-end;
-
-procedure XorBlock(I1, I2, O1: PByteArray; Len: integer);
-var
-	i: Integer;
-begin
-	//O1 <- I1 xor I2
-	for i := 0 to Len-1 do
-		O1[i] := I1[i] xor I2[i];
-end;
-
-procedure IncBlock(P: PByteArray; Len: integer);
-begin
-	Inc(P[Len-1]);
-	if (P[Len-1] = 0) and (Len > 1) then
-		IncBlock(P,Len-1);
+	Move(FInitBlock, FLastBlock, 8);
 end;
 
 {$IFDEF UnitTests}
