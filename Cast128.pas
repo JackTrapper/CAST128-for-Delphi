@@ -1,4 +1,4 @@
-{
+﻿{
 ***************************************************
 * A binary compatible CAST-128 implementation     *
 * written by Dave Barton (davebarton@bigfoot.com) *
@@ -24,8 +24,10 @@ type
 		FLastBlock: array[0..7] of Byte;    { current IV }
 		FRounds: Integer;
 		FInitialized: Boolean;
-		function SelfTestA: Boolean; //Single Plaintext-key-ciphertext set
-		function SelfTestB: Boolean; //Full maintenance test
+		function SelfTestA_128: Boolean; //Single Plaintext-key-ciphertext set, 128-bit key
+		function SelfTestA_80: Boolean;  //Single Plaintext-key-ciphertext set,  80-bit key
+		function SelfTestA_40: Boolean;  //Single Plaintext-key-ciphertext set,  40-bit key
+		function SelfTestB: Boolean;     //Full maintenance test
 		class function F1(D, K: Cardinal; r: Byte): Cardinal;
 		class function F2(D, K: Cardinal; r: Byte): Cardinal;
 		class function F3(D, K: Cardinal; r: Byte): Cardinal;
@@ -88,7 +90,10 @@ type
 		procedure SetUp; override;
 		procedure TearDown; override;
 	published
-		procedure TestSelfTest;
+		procedure SelfTestA_SingleSet_128bit;
+		procedure SelfTestA_SingleSet_80bit;
+		procedure SelfTestA_SingleSet_40bit;
+		procedure SelfTestB_FullMaintenance;
 	end;
 {$ENDIF}
 
@@ -423,11 +428,13 @@ type
 function TCast128.SelfTest: Boolean;
 begin
 	Result :=
-			SelfTestA
+			SelfTestA_128
+			and SelfTestA_80
+			and SelfTestA_40
 			and SelfTestB;
 end;
 
-function TCast128.SelfTestA: Boolean;
+function TCast128.SelfTestA_128: Boolean;
 const
 	Key:      array[0..15] of Byte = ($01,$23,$45,$67,$12,$34,$56,$78,$23,$45,$67,$89,$34,$56,$78,$9A);
 	InBlock:  array[0..7]  of Byte = ($01,$23,$45,$67,$89,$AB,$CD,$EF);
@@ -437,6 +444,62 @@ var
 begin
 {
 	Appendix B.1. Single Plaintext-Key-Ciphertext Sets
+}
+	Init(@Key[0], Sizeof(Key), nil);
+	try
+		EncryptECB(@InBlock[0], @block[0]);
+		Result := CompareMem(@block[0], @OutBlock[0], Sizeof(block));
+		if (not Result) then
+			raise Exception.Create('CAST-128 encryption self-test failed');
+
+		DecryptECB(@block, @block);
+	finally
+		Self.Burn;
+	end;
+
+	Result := Result and CompareMem(@block[0], @InBlock[0], Sizeof(block));
+	if (not Result) then
+		raise Exception.Create('CAST-128 decryption self-test failed');
+end;
+
+function TCast128.SelfTestA_40: Boolean;
+const
+	Key:      array[0..4] of Byte = ($01,$23,$45,$67,$12);
+	InBlock:  array[0..7] of Byte = ($01,$23,$45,$67,$89,$AB,$CD,$EF);
+	OutBlock: array[0..7] of Byte = ($7A,$C8,$16,$D1,$6E,$9B,$30,$2E);
+var
+	block: array[0..7] of Byte;
+begin
+{
+	Appendix B.1. Single Plaintext-Key-Ciphertext Sets (80-bit key)
+}
+	Init(@Key[0], Sizeof(Key), nil);
+	try
+		EncryptECB(@InBlock[0], @block[0]);
+		Result := CompareMem(@block[0], @OutBlock[0], Sizeof(block));
+		if (not Result) then
+			raise Exception.Create('CAST-128 encryption self-test failed');
+
+		DecryptECB(@block, @block);
+	finally
+		Self.Burn;
+	end;
+
+	Result := Result and CompareMem(@block[0], @InBlock[0], Sizeof(block));
+	if (not Result) then
+		raise Exception.Create('CAST-128 decryption self-test failed');
+end;
+
+function TCast128.SelfTestA_80: Boolean;
+const
+	Key:      array[0..9] of Byte = ($01,$23,$45,$67,$12,$34,$56,$78,$23,$45);
+	InBlock:  array[0..7] of Byte = ($01,$23,$45,$67,$89,$AB,$CD,$EF);
+	OutBlock: array[0..7] of Byte = ($EB,$6A,$71,$1A,$2C,$02,$27,$1B);
+var
+	block: array[0..7] of Byte;
+begin
+{
+	Appendix B.1. Single Plaintext-Key-Ciphertext Sets (80-bit key)
 }
 	Init(@Key[0], Sizeof(Key), nil);
 	try
@@ -833,6 +896,10 @@ begin
 	end;
 end;
 
+//F1: I = rol(m+D, r); return s1[Ia] ^ s2[Ib] - s3[Ic] + s4[Id];
+//F2: I = rol(m^D, r); return s1[Ia] - s2[Ib] + s3[Ic] ^ s4[Id];
+//F3: I = rol(m-D, r); return s1[Ia] + s2[Ib] ^ s3[Ic] - s4[Id];
+
 class function TCast128.F1(D, K: Cardinal; r: Byte): Cardinal;
 var
 	I: Cardinal;
@@ -908,10 +975,26 @@ begin
 	inherited;
 end;
 
-procedure TestTCast128.TestSelfTest;
+procedure TestTCast128.SelfTestA_SingleSet_128bit;
 begin
-	FCast128.SelfTest;
+	CheckTrue(FCast128.SelfTestA_128);
 end;
+
+procedure TestTCast128.SelfTestA_SingleSet_40bit;
+begin
+	CheckTrue(FCast128.SelfTestA_40);
+end;
+
+procedure TestTCast128.SelfTestA_SingleSet_80bit;
+begin
+	CheckTrue(FCast128.SelfTestA_80);
+end;
+
+procedure TestTCast128.SelfTestB_FullMaintenance;
+begin
+	CheckTrue(FCast128.SelfTestB);
+end;
+
 {$ENDIF}
 
 initialization
